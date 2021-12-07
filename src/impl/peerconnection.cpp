@@ -34,17 +34,17 @@
 #include "dtlssrtptransport.hpp"
 #endif
 
+#include <array>
 #include <iomanip>
 #include <set>
 #include <thread>
-#include <array>
 
 using namespace std::placeholders;
 
 namespace rtc::impl {
 
 static LogCounter COUNTER_MEDIA_TRUNCATED(plog::warning,
-                                          "Number of RTP packets truncated over past second");
+                                          "Number of truncated RTP packets over past second");
 static LogCounter COUNTER_SRTP_DECRYPT_ERROR(plog::warning,
                                              "Number of SRTP decryption errors over past second");
 static LogCounter COUNTER_SRTP_ENCRYPT_ERROR(plog::warning,
@@ -334,25 +334,25 @@ void PeerConnection::closeTransports() {
 	// Reset callbacks now that state is changed
 	resetCallbacks();
 
+	// Pass the pointers to a thread, allowing to terminate a transport from its own thread
+	auto sctp = std::atomic_exchange(&mSctpTransport, decltype(mSctpTransport)(nullptr));
+	auto dtls = std::atomic_exchange(&mDtlsTransport, decltype(mDtlsTransport)(nullptr));
+	auto ice = std::atomic_exchange(&mIceTransport, decltype(mIceTransport)(nullptr));
+
+	if (sctp) {
+		sctp->onRecv(nullptr);
+		sctp->onBufferedAmount(nullptr);
+	}
+
+	using array = std::array<shared_ptr<Transport>, 3>;
+	array transports{std::move(sctp), std::move(dtls), std::move(ice)};
+
+	for (const auto &t : transports)
+		if (t)
+			t->onStateChange(nullptr);
+
 	// Initiate transport stop on the processor after closing the data channels
-	mProcessor->enqueue([this]() {
-		// Pass the pointers to a thread
-		auto sctp = std::atomic_exchange(&mSctpTransport, decltype(mSctpTransport)(nullptr));
-		auto dtls = std::atomic_exchange(&mDtlsTransport, decltype(mDtlsTransport)(nullptr));
-		auto ice = std::atomic_exchange(&mIceTransport, decltype(mIceTransport)(nullptr));
-
-		if (sctp) {
-			sctp->onRecv(nullptr);
-			sctp->onBufferedAmount(nullptr);
-		}
-
-		using array = std::array<shared_ptr<Transport>, 3>;
-		array transports{std::move(sctp), std::move(dtls), std::move(ice)};
-
-		for (const auto &t : transports)
-			if (t)
-				t->onStateChange(nullptr);
-
+	mProcessor->enqueue([transports = std::move(transports)]() {
 		ThreadPool::Instance().enqueue([transports = std::move(transports)]() mutable {
 			for (const auto &t : transports)
 				if (t)
@@ -443,25 +443,25 @@ void PeerConnection::forwardMedia(message_ptr message) {
 	if (message->type == Message::Control) {
 		std::set<uint32_t> ssrcs;
 		size_t offset = 0;
-		while ((sizeof(rtc::RTCP_HEADER) + offset) <= message->size()) {
-			auto header = reinterpret_cast<rtc::RTCP_HEADER *>(message->data() + offset);
+		while ((sizeof(RtcpHeader) + offset) <= message->size()) {
+			auto header = reinterpret_cast<RtcpHeader *>(message->data() + offset);
 			if (header->lengthInBytes() > message->size() - offset) {
 				COUNTER_MEDIA_TRUNCATED++;
 				break;
 			}
 			offset += header->lengthInBytes();
 			if (header->payloadType() == 205 || header->payloadType() == 206) {
-				auto rtcpfb = reinterpret_cast<RTCP_FB_HEADER *>(header);
+				auto rtcpfb = reinterpret_cast<RtcpFbHeader *>(header);
 				ssrcs.insert(rtcpfb->packetSenderSSRC());
 				ssrcs.insert(rtcpfb->mediaSourceSSRC());
 
 			} else if (header->payloadType() == 200 || header->payloadType() == 201) {
-				auto rtcpsr = reinterpret_cast<RTCP_SR *>(header);
+				auto rtcpsr = reinterpret_cast<RtcpSr *>(header);
 				ssrcs.insert(rtcpsr->senderSSRC());
 				for (int i = 0; i < rtcpsr->header.reportCount(); ++i)
 					ssrcs.insert(rtcpsr->getReportBlock(i)->getSSRC());
 			} else if (header->payloadType() == 202) {
-				auto sdes = reinterpret_cast<RTCP_SDES *>(header);
+				auto sdes = reinterpret_cast<RtcpSdes *>(header);
 				if (!sdes->isValid()) {
 					PLOG_WARNING << "RTCP SDES packet is invalid";
 					continue;
@@ -631,7 +631,8 @@ void PeerConnection::shiftDataChannels() {
 	}
 }
 
-void PeerConnection::iterateDataChannels(std::function<void(shared_ptr<DataChannel> channel)> func) {
+void PeerConnection::iterateDataChannels(
+    std::function<void(shared_ptr<DataChannel> channel)> func) {
 	std::vector<shared_ptr<DataChannel>> locked;
 	{
 		std::shared_lock lock(mDataChannelsMutex); // read-only
@@ -646,21 +647,21 @@ void PeerConnection::iterateDataChannels(std::function<void(shared_ptr<DataChann
 		}
 	}
 
-	for(auto &channel : locked)
+	for (auto &channel : locked)
 		func(std::move(channel));
 }
 
 void PeerConnection::cleanupDataChannels() {
-		std::unique_lock lock(mDataChannelsMutex); // we are going to erase
-		auto it = mDataChannels.begin();
-		while (it != mDataChannels.end()) {
-			if (!it->second.lock()) {
-				it = mDataChannels.erase(it);
-				continue;
-			}
-
-			++it;
+	std::unique_lock lock(mDataChannelsMutex); // we are going to erase
+	auto it = mDataChannels.begin();
+	while (it != mDataChannels.end()) {
+		if (!it->second.lock()) {
+			it = mDataChannels.erase(it);
+			continue;
 		}
+
+		++it;
+	}
 }
 
 void PeerConnection::openDataChannels() {
