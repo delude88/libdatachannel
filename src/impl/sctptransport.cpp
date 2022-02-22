@@ -178,11 +178,10 @@ void SctpTransport::Cleanup() {
 		std::this_thread::sleep_for(100ms);
 }
 
-SctpTransport::SctpTransport(shared_ptr<Transport> lower, const Configuration &config,
-                             uint16_t port, message_callback recvCallback,
-                             amount_callback bufferedAmountCallback,
+SctpTransport::SctpTransport(shared_ptr<Transport> lower, const Configuration &config, Ports ports,
+                             message_callback recvCallback, amount_callback bufferedAmountCallback,
                              state_callback stateChangeCallback)
-    : Transport(lower, std::move(stateChangeCallback)), mPort(port),
+    : Transport(lower, std::move(stateChangeCallback)), mPorts(std::move(ports)),
       mSendQueue(0, message_size_func), mBufferedAmountCallback(std::move(bufferedAmountCallback)) {
 	onRecv(std::move(recvCallback));
 
@@ -361,28 +360,34 @@ void SctpTransport::close() {
 	}
 }
 
-void SctpTransport::connect() {
-	if (!mSock)
-		throw std::logic_error("Attempted SCTP connect with closed socket");
-
-	PLOG_DEBUG << "SCTP connecting";
-	changeState(State::Connecting);
-
+struct sockaddr_conn SctpTransport::getSockAddrConn(uint16_t port) {
 	struct sockaddr_conn sconn = {};
 	sconn.sconn_family = AF_CONN;
-	sconn.sconn_port = htons(mPort);
+	sconn.sconn_port = htons(port);
 	sconn.sconn_addr = this;
 #ifdef HAVE_SCONN_LEN
 	sconn.sconn_len = sizeof(sconn);
 #endif
+	return sconn;
+}
 
-	if (usrsctp_bind(mSock, reinterpret_cast<struct sockaddr *>(&sconn), sizeof(sconn)))
+void SctpTransport::connect() {
+	if (!mSock)
+		throw std::logic_error("Attempted SCTP connect with closed socket");
+
+	PLOG_DEBUG << "SCTP connecting (local port=" << mPorts.local
+	           << ", remote port=" << mPorts.remote << ")";
+	changeState(State::Connecting);
+
+	auto local = getSockAddrConn(mPorts.local);
+	if (usrsctp_bind(mSock, reinterpret_cast<struct sockaddr *>(&local), sizeof(local)))
 		throw std::runtime_error("Could not bind usrsctp socket, errno=" + std::to_string(errno));
 
 	// According to RFC 8841, both endpoints must initiate the SCTP association, in a
 	// simultaneous-open manner, irrelevent to the SDP setup role.
 	// See https://tools.ietf.org/html/rfc8841#section-9.3
-	int ret = usrsctp_connect(mSock, reinterpret_cast<struct sockaddr *>(&sconn), sizeof(sconn));
+	auto remote = getSockAddrConn(mPorts.remote);
+	int ret = usrsctp_connect(mSock, reinterpret_cast<struct sockaddr *>(&remote), sizeof(remote));
 	if (ret && errno != EINPROGRESS)
 		throw std::runtime_error("Connection attempt failed, errno=" + std::to_string(errno));
 }
@@ -436,8 +441,12 @@ bool SctpTransport::flush() {
 void SctpTransport::closeStream(unsigned int stream) {
 	std::lock_guard lock(mSendMutex);
 
-	// This method must not call the buffered callback synchronously
+	// RFC 8831 6.7. Closing a Data Channel
+	// Closing of a data channel MUST be signaled by resetting the corresponding outgoing streams
+	// See https://tools.ietf.org/html/rfc8831#section-6.7
 	mSendQueue.push(make_message(0, Message::Reset, to_uint16(stream)));
+
+	// This method must not call the buffered callback synchronously
 	mProcessor.enqueue(&SctpTransport::flush, this);
 }
 
@@ -847,12 +856,11 @@ void SctpTransport::processNotification(const union sctp_notification *notify, s
 			PLOG_VERBOSE << "SCTP reset event, " << desc.str();
 		}
 
-		if (flags & SCTP_STREAM_RESET_OUTGOING_SSN) {
-			for (int i = 0; i < count; ++i) {
-				uint16_t streamId = reset_event.strreset_stream_list[i];
-				closeStream(streamId);
-			}
-		}
+		// RFC 8831 6.7. Closing a Data Channel
+		// If one side decides to close the data channel, it resets the corresponding outgoing
+		// stream. When the peer sees that an incoming stream was reset, it also resets its
+		// corresponding outgoing stream.
+		// See https://tools.ietf.org/html/rfc8831#section-6.7
 		if (flags & SCTP_STREAM_RESET_INCOMING_SSN) {
 			const byte dataChannelCloseMessage{0x04};
 			for (int i = 0; i < count; ++i) {

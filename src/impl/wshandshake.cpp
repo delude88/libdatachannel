@@ -20,6 +20,7 @@
 #include "base64.hpp"
 #include "internals.hpp"
 #include "sha.hpp"
+#include "utils.hpp"
 
 #if RTC_ENABLE_WEBSOCKET
 
@@ -27,36 +28,10 @@
 #include <chrono>
 #include <climits>
 #include <iostream>
-#include <iterator>
 #include <random>
 #include <sstream>
 
 using std::string;
-
-namespace {
-
-std::vector<string> explode(const string &str, char delim) {
-	std::vector<std::string> result;
-	std::istringstream ss(str);
-	string token;
-	while (std::getline(ss, token, delim))
-		result.push_back(token);
-
-	return result;
-}
-
-string implode(const std::vector<string> &tokens, char delim) {
-	string sdelim(1, delim);
-	std::ostringstream ss;
-	std::copy(tokens.begin(), tokens.end(), std::ostream_iterator<string>(ss, sdelim.c_str()));
-	string result = ss.str();
-	if (result.size() > 0)
-		result.resize(result.size() - 1);
-
-	return result;
-}
-
-} // namespace
 
 namespace rtc::impl {
 
@@ -108,7 +83,7 @@ string WsHandshake::generateHttpRequest() {
 	             mKey + "\r\n";
 
 	if (!mProtocols.empty())
-		out += "Sec-WebSocket-Protocol: " + implode(mProtocols, ',') + "\r\n";
+		out += "Sec-WebSocket-Protocol: " + utils::implode(mProtocols, ',') + "\r\n";
 
 	out += "\r\n";
 
@@ -183,7 +158,7 @@ size_t WsHandshake::parseHttpRequest(const byte *buffer, size_t size) {
 
 	string method, path, protocol;
 	requestLine >> method >> path >> protocol;
-	PLOG_DEBUG << "WebSocket request method \"" << method << "\" for path: " << path;
+	PLOG_DEBUG << "WebSocket request method=\"" << method << "\", path=\"" << path << "\"";
 	if (method != "GET")
 		throw RequestError("Invalid request method \"" + method + "\" for WebSocket", 405);
 
@@ -205,7 +180,7 @@ size_t WsHandshake::parseHttpRequest(const byte *buffer, size_t size) {
 	std::transform(h->second.begin(), h->second.end(), std::back_inserter(upgrade),
 	               [](char c) { return std::tolower(c); });
 	if (upgrade != "websocket")
-		throw RequestError("WebSocket upgrade header mismatching: " + h->second, 426);
+		throw RequestError("WebSocket upgrade header mismatching", 426);
 
 	h = headers.find("sec-websocket-key");
 	if (h == headers.end())
@@ -215,7 +190,7 @@ size_t WsHandshake::parseHttpRequest(const byte *buffer, size_t size) {
 
 	h = headers.find("sec-websocket-protocol");
 	if (h != headers.end())
-		mProtocols = explode(h->second, ',');
+		mProtocols = utils::explode(h->second, ',');
 
 	return length;
 }
@@ -236,7 +211,7 @@ size_t WsHandshake::parseHttpResponse(const byte *buffer, size_t size) {
 	string protocol;
 	unsigned int code = 0;
 	status >> protocol >> code;
-	PLOG_DEBUG << "WebSocket response code: " << code;
+	PLOG_DEBUG << "WebSocket response code=" << code;
 	if (code != 101)
 		throw std::runtime_error("Unexpected response code " + to_string(code) + " for WebSocket");
 
@@ -250,7 +225,7 @@ size_t WsHandshake::parseHttpResponse(const byte *buffer, size_t size) {
 	std::transform(h->second.begin(), h->second.end(), std::back_inserter(upgrade),
 	               [](char c) { return std::tolower(c); });
 	if (upgrade != "websocket")
-		throw Error("WebSocket update header mismatching: " + h->second);
+		throw Error("WebSocket update header mismatching");
 
 	h = headers.find("sec-websocket-accept");
 	if (h == headers.end())

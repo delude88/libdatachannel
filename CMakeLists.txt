@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.7)
 project(libdatachannel
-	VERSION 0.16.0
+	VERSION 0.16.5
 	LANGUAGES CXX)
 set(PROJECT_DESCRIPTION "C/C++ WebRTC network library featuring Data Channels, Media Transport, and WebSockets")
 
@@ -116,10 +116,12 @@ set(LIBDATACHANNEL_IMPL_SOURCES
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/threadpool.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tls.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/track.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/utils.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/processor.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/base64.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/sha.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/pollinterrupter.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/pollservice.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tcpserver.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tcptransport.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tlstransport.cpp
@@ -146,10 +148,12 @@ set(LIBDATACHANNEL_IMPL_HEADERS
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/threadpool.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tls.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/track.hpp
+	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/utils.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/processor.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/base64.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/sha.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/pollinterrupter.hpp
+	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/pollservice.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tcpserver.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tcptransport.hpp
 	${CMAKE_CURRENT_SOURCE_DIR}/src/impl/tlstransport.hpp
@@ -270,18 +274,18 @@ else()
 	target_compile_definitions(datachannel PUBLIC RTC_ENABLE_MEDIA=1)
 	target_compile_definitions(datachannel-static PUBLIC RTC_ENABLE_MEDIA=1)
 	if(USE_SYSTEM_SRTP)
-		find_package(SRTP REQUIRED)
-		if(NOT TARGET SRTP::SRTP)
-			add_library(SRTP::SRTP UNKNOWN IMPORTED)
-			set_target_properties(SRTP::SRTP PROPERTIES
+		find_package(libSRTP REQUIRED)
+		if(NOT TARGET libSRTP::srtp2)
+			add_library(libSRTP::srtp2 UNKNOWN IMPORTED)
+			set_target_properties(libSRTP::srtp2 PROPERTIES
 				INTERFACE_INCLUDE_DIRECTORIES ${SRTP_INCLUDE_DIRS}
 				IMPORTED_LINK_INTERFACE_LANGUAGES C
 				IMPORTED_LOCATION ${SRTP_LIBRARIES})
 		endif()
 		target_compile_definitions(datachannel PRIVATE RTC_SYSTEM_SRTP=1)
 		target_compile_definitions(datachannel-static PRIVATE RTC_SYSTEM_SRTP=1)
-		target_link_libraries(datachannel PRIVATE SRTP::SRTP)
-		target_link_libraries(datachannel-static PRIVATE SRTP::SRTP)
+		target_link_libraries(datachannel PRIVATE libSRTP::srtp2)
+		target_link_libraries(datachannel-static PRIVATE libSRTP::srtp2)
 	else()
 		add_subdirectory(deps/libsrtp EXCLUDE_FROM_ALL)
 		target_compile_definitions(datachannel PRIVATE RTC_SYSTEM_SRTP=0)

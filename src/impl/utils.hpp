@@ -16,50 +16,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef RTC_IMPL_INIT_H
-#define RTC_IMPL_INIT_H
+#ifndef RTC_IMPL_UTILS_H
+#define RTC_IMPL_UTILS_H
 
 #include "common.hpp"
-#include "global.hpp" // for SctpSettings
 
-#include <chrono>
-#include <future>
-#include <mutex>
+#include <vector>
 
-namespace rtc::impl {
+namespace rtc::impl::utils {
 
-using init_token = shared_ptr<void>;
-
-class Init {
-public:
-	static Init &Instance();
-
-	Init(const Init &) = delete;
-	Init &operator=(const Init &) = delete;
-	Init(Init &&) = delete;
-	Init &operator=(Init &&) = delete;
-
-	init_token token();
-	void preload();
-	std::shared_future<void> cleanup();
-	void setSctpSettings(SctpSettings s);
-
-private:
-	Init();
-	~Init();
-
-	void doInit();
-	void doCleanup();
-
-	std::optional<shared_ptr<void>> mGlobal;
-	weak_ptr<void> mWeak;
-	bool mInitialized = false;
-	SctpSettings mCurrentSctpSettings = {};
-	std::mutex mMutex;
-	std::shared_future<void> mCleanupFuture;
-
-	struct TokenPayload;
-};
+std::vector<string> explode(const string &str, char delim);
+string implode(const std::vector<string> &tokens, char delim);
 
 } // namespace rtc::impl
 

@@ -119,13 +119,21 @@ size_t PeerConnection::remoteMaxMessageSize() const {
 // Helper for PeerConnection::initXTransport methods: start and emplace the transport
 template <typename T>
 shared_ptr<T> emplaceTransport(PeerConnection *pc, shared_ptr<T> *member, shared_ptr<T> transport) {
-	transport->start();
 	std::atomic_store(member, transport);
+	try {
+		transport->start();
+	} catch (...) {
+		std::atomic_store(member, decltype(transport)(nullptr));
+		transport->stop();
+		throw;
+	}
+
 	if (pc->state.load() == PeerConnection::State::Closed) {
 		std::atomic_store(member, decltype(transport)(nullptr));
 		transport->stop();
 		return nullptr;
 	}
+
 	return transport;
 }
 
@@ -267,17 +275,24 @@ shared_ptr<SctpTransport> PeerConnection::initSctpTransport() {
 		if (!lower)
 			throw std::logic_error("No underlying DTLS transport for SCTP transport");
 
+		auto local = localDescription();
+		if (!local || !local->application())
+			throw std::logic_error("Starting SCTP transport without local application description");
+
 		auto remote = remoteDescription();
 		if (!remote || !remote->application())
-			throw std::logic_error("Starting SCTP transport without application description");
+			throw std::logic_error(
+			    "Starting SCTP transport without remote application description");
 
-		uint16_t sctpPort = remote->application()->sctpPort().value_or(DEFAULT_SCTP_PORT);
+		SctpTransport::Ports ports = {};
+		ports.local = local->application()->sctpPort().value_or(DEFAULT_SCTP_PORT);
+		ports.remote = remote->application()->sctpPort().value_or(DEFAULT_SCTP_PORT);
 
 		// This is the last occasion to ensure the stream numbers are coherent with the role
 		shiftDataChannels();
 
 		auto transport = std::make_shared<SctpTransport>(
-		    lower, config, sctpPort, weak_bind(&PeerConnection::forwardMessage, this, _1),
+		    lower, config, std::move(ports), weak_bind(&PeerConnection::forwardMessage, this, _1),
 		    weak_bind(&PeerConnection::forwardBufferedAmount, this, _1, _2),
 		    [this, weak_this = weak_from_this()](SctpTransport::State transportState) {
 			    auto shared_this = weak_this.lock();
@@ -412,10 +427,18 @@ void PeerConnection::forwardMessage(message_ptr message) {
 		if (!iceTransport || !sctpTransport)
 			return;
 
+		// See https://tools.ietf.org/html/rfc8832
 		const byte dataChannelOpenMessage{0x03};
 		uint16_t remoteParity = (iceTransport->role() == Description::Role::Active) ? 1 : 0;
-		if (message->type == Message::Control && *message->data() == dataChannelOpenMessage &&
-		    stream % 2 == remoteParity) {
+		if (message->type == Message::Control) {
+			if (message->size() == 0 || *message->data() != dataChannelOpenMessage)
+				return; // ignore
+
+			if (stream % 2 != remoteParity) {
+				// The odd/even rule is violated, close the DataChannel
+				sctpTransport->closeStream(message->stream);
+				return;
+			}
 
 			channel =
 			    std::make_shared<NegotiatedDataChannel>(weak_from_this(), sctpTransport, stream);
@@ -424,6 +447,7 @@ void PeerConnection::forwardMessage(message_ptr message) {
 
 			std::unique_lock lock(mDataChannelsMutex); // we are going to emplace
 			mDataChannels.emplace(stream, channel);
+
 		} else {
 			// Invalid, close the DataChannel
 			sctpTransport->closeStream(message->stream);
@@ -593,7 +617,7 @@ shared_ptr<DataChannel> PeerConnection::emplaceDataChannel(string label, DataCha
 			stream += 2;
 		}
 	}
-	// If the DataChannel is user-negotiated, do not negociate it here
+	// If the DataChannel is user-negotiated, do not negotiate it here
 	auto channel =
 	    init.negotiated
 	        ? std::make_shared<DataChannel>(weak_from_this(), stream, std::move(label),
